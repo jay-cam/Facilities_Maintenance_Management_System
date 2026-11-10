@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: facility-maintenance-db
+
+    environment:
+      POSTGRES_DB: facility_maintenance
+      POSTGRES_USER: facility_admin
+      POSTGRES_PASSWORD: dev_password
+
+    ports:
+      - "5433:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
