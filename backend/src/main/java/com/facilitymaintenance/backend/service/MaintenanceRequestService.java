@@ -1,28 +1,17 @@
 package com.facilitymaintenance.backend.service;
 
-import com.facilitymaintenance.backend.model.MaintenanceRequest;
-import com.facilitymaintenance.backend.model.RequestStatus;
-import com.facilitymaintenance.backend.repository.MaintenanceRequestRepository;
-import com.facilitymaintenance.backend.model.WorkOrderHistory;
-import com.facilitymaintenance.backend.model.User;
-import com.facilitymaintenance.backend.repository.WorkOrderCommentRepository;
-import com.facilitymaintenance.backend.repository.WorkOrderHistoryRepository;
-import com.facilitymaintenance.backend.repository.UserRepository;
-import com.facilitymaintenance.backend.model.UserRole;
 import com.facilitymaintenance.backend.dto.CreateMaintenanceRequest;
-import com.facilitymaintenance.backend.repository.WorkOrderCommentRepository;
-import com.facilitymaintenance.backend.model.WorkOrderComment;
+import com.facilitymaintenance.backend.model.*;
+import com.facilitymaintenance.backend.repository.*;
 
-import com.sun.tools.javac.Main;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.HttpStatusCode;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
-import javax.net.ssl.HttpsURLConnection;
-import java.util.List;
 import java.time.LocalDateTime;
+import java.util.Comparator;
+import java.util.List;
 
 @Service
 public class MaintenanceRequestService {
@@ -32,33 +21,166 @@ public class MaintenanceRequestService {
     private final UserRepository userRepository;
     private final WorkOrderCommentRepository commentRepository;
 
-    public MaintenanceRequestService(MaintenanceRequestRepository repository,
-                                     WorkOrderHistoryRepository historyRepository,
-                                     UserRepository userRepository, WorkOrderCommentRepository commentRepository) {
+    /**
+     * Constructor injection provides access to the repositories
+     * responsible for work orders, users, history, and comments.
+     */
+    public MaintenanceRequestService(
+            MaintenanceRequestRepository repository,
+            WorkOrderHistoryRepository historyRepository,
+            UserRepository userRepository,
+            WorkOrderCommentRepository commentRepository
+    ) {
         this.repository = repository;
         this.historyRepository = historyRepository;
         this.userRepository = userRepository;
         this.commentRepository = commentRepository;
     }
 
+
+    // --------------------------------------------------
+    // Shared Lookup and Access-Control Helpers
+    // --------------------------------------------------
+
+    /**
+     * Retrieves a user by ID.
+     *
+     * Returns HTTP 404 when the user does not exist.
+     */
+    private User findUser(Long userId) {
+        return userRepository.findById(userId).orElseThrow(
+                () -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "User not found."
+                )
+        );
+    }
+
+    /**
+     * Retrieves a maintenance request by ID.
+     *
+     * Returns HTTP 404 when the request does not exist.
+     */
+    private MaintenanceRequest findRequest(Long requestId) {
+        return repository.findById(requestId).orElseThrow(
+                () -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "Maintenance request not found."
+                )
+        );
+    }
+
+    /**
+     * Determines whether a user belongs to the same
+     * department as a maintenance request.
+     */
+    private boolean belongsToSameDepartment(
+            User user,
+            MaintenanceRequest request
+    ) {
+        return user.getDepartment() != null
+                && request.getDepartment() != null
+                && user.getDepartment().getId().equals(
+                request.getDepartment().getId()
+        );
+    }
+
+    /**
+     * Enforces department-based visibility restrictions.
+     *
+     * Technicians can view requests across departments.
+     *
+     * Requesters and supervisors can only view requests
+     * belonging to their own department.
+     */
+    private void verifyCanViewRequest(
+            User user,
+            MaintenanceRequest request
+    ) {
+
+        if (user.getRole() == UserRole.TECHNICIAN) {
+            return;
+        }
+
+        if ((user.getRole() == UserRole.REQUESTER
+                || user.getRole() == UserRole.SUPERVISOR)
+                && belongsToSameDepartment(user, request)) {
+            return;
+        }
+
+        throw new ResponseStatusException(
+                HttpStatus.FORBIDDEN,
+                "You cannot access work orders outside your department."
+        );
+    }
+
+    /**
+     * Ensures that only the technician assigned to
+     * a work order can perform technician actions.
+     */
+    private void verifyAssignedTechnician(
+            User actor,
+            MaintenanceRequest request
+    ) {
+
+        if (actor.getRole() != UserRole.TECHNICIAN) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "Only technicians can modify work orders."
+            );
+        }
+
+        if (request.getAssignedTechnician() == null
+                || !request.getAssignedTechnician().getId().equals(actor.getId())) {
+
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "Technician is not assigned to this work order."
+            );
+        }
+    }
+
+
+    // --------------------------------------------------
+    // Create Maintenance Request
+    // --------------------------------------------------
+
+    /**
+     * Creates a new maintenance request.
+     *
+     * New requests:
+     * - Belong to the requester's department.
+     * - Begin with OPEN status.
+     * - Begin with PENDING_APPROVAL, approval.
+     * - Have no assigned technician.
+     *
+     * A supervisor must approve the request before
+     * it can be assigned or started.
+     */
     @Transactional
-    public MaintenanceRequest createRequest(CreateMaintenanceRequest requestData, Long requesterId) {
+    public MaintenanceRequest createRequest(
+            CreateMaintenanceRequest requestData,
+            Long requesterId
+    ) {
 
-        // Find the user submitting the maintenance request.
-        User requester = userRepository.findById(requesterId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "Requester not found."
-        ));
+        User requester = findUser(requesterId);
 
-        // Verify the user has the REQUESTER role.
-        if(requester.getRole() != UserRole.REQUESTER && requester.getRole() != UserRole.SUPERVISOR) {
+        if (requester.getRole() != UserRole.REQUESTER
+                && requester.getRole() != UserRole.SUPERVISOR) {
+
             throw new ResponseStatusException(
                     HttpStatus.FORBIDDEN,
                     "Only requesters and supervisors can submit maintenance requests."
             );
         }
 
-        // Construct a new entity using only approved fields.
+        if (requester.getDepartment() == null) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Requester must belong to a department."
+            );
+        }
+
         MaintenanceRequest request = new MaintenanceRequest(
                 requestData.title(),
                 requestData.description(),
@@ -67,122 +189,293 @@ public class MaintenanceRequestService {
                 requestData.condition()
         );
 
-        // Associate the request with the submitting user.
         request.setRequester(requester);
-
-        // Verify the requester belongs to a department
-        if(requester.getDepartment() == null) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "Requester must belong to a department."
-            );
-        }
-
-        // Automatically assign the requester's department.
         request.setDepartment(requester.getDepartment());
 
-        // New maintenance requests always begin OPEN.
         request.setStatus(RequestStatus.OPEN);
+        request.setApprovalStatus(ApprovalStatus.PENDING_APPROVAL);
 
-        // Save the maintenance request.
         MaintenanceRequest savedRequest = repository.save(request);
 
-        // Record the submission in work-order history.
         historyRepository.save(new WorkOrderHistory(
                 savedRequest,
                 requester,
                 RequestStatus.OPEN,
-                "Maintenance request submitted."
+                "Maintenance request submitted. Awaiting supervisor approval."
         ));
 
         return savedRequest;
     }
 
-    public List<MaintenanceRequest> getAllRequests() {
+
+    // --------------------------------------------------
+    // Retrieve Work Orders
+    // --------------------------------------------------
+
+    /**
+     * Retrieves work orders across all departments.
+     *
+     * Only technicians can access this endpoint.
+     */
+    public List<MaintenanceRequest> getAllRequests(Long userId) {
+
+        User user = findUser(userId);
+
+        if (user.getRole() != UserRole.TECHNICIAN) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "Only technicians can view all departments."
+            );
+        }
+
         return repository.findAll();
     }
 
+    /**
+     * Retrieves work orders belonging to the
+     * current requester's or supervisor's department.
+     */
     public List<MaintenanceRequest> getDepartmentRequests(Long userId) {
 
-        // Find the user.
-        User user = userRepository.findById(userId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "User not found."
-        ));
+        User user = findUser(userId);
 
-        // Only requesters and supervisors can view department requests
-        if (user.getRole() != UserRole.REQUESTER && user.getRole() != UserRole.SUPERVISOR) {
+        if (user.getRole() != UserRole.REQUESTER
+                && user.getRole() != UserRole.SUPERVISOR) {
+
             throw new ResponseStatusException(
                     HttpStatus.FORBIDDEN,
                     "Only requesters and supervisors can view department requests."
             );
         }
 
-            // Verify the user belongs to a department.
-            if(user.getDepartment() == null) {
-                throw new ResponseStatusException(
-                        HttpStatus.BAD_REQUEST,
-                        "User must belong to a department."
-                );
-            }
-
-            // Retrieve all maintenance requests belonging to the user's department.
-            return repository.findByDepartmentId(
-                    user.getDepartment().getId()
-            );
-        }
-
-    public List<WorkOrderHistory> getRequestHistory(Long requestId){
-
-        if(!repository.existsById(requestId)) {
+        if (user.getDepartment() == null) {
             throw new ResponseStatusException(
-                    HttpStatus.NOT_FOUND,
-                    "Maintenance request not found."
+                    HttpStatus.BAD_REQUEST,
+                    "User must belong to a department."
             );
         }
 
-        return historyRepository.findByMaintenanceRequestIdOrderByCreatedAtAsc(requestId);
+        return repository.findByDepartmentId(
+                user.getDepartment().getId()
+        );
     }
 
-    public MaintenanceRequest getRequestById(Long id) {
-        return repository.findById(id).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "Maintenance request not found."
-        ));
+    /**
+     * Retrieves a work order after verifying that
+     * the current user has permission to view it.
+     */
+    public MaintenanceRequest getRequestById(
+            Long id,
+            Long userId
+    ) {
+
+        MaintenanceRequest request = findRequest(id);
+        User user = findUser(userId);
+
+        verifyCanViewRequest(user, request);
+
+        return request;
     }
 
+    /**
+     * Retrieves the chronological history of a work order.
+     *
+     * Department access restrictions also apply
+     * to the history endpoint.
+     */
+    public List<WorkOrderHistory> getRequestHistory(
+            Long requestId,
+            Long userId
+    ) {
+
+        MaintenanceRequest request = findRequest(requestId);
+        User user = findUser(userId);
+
+        verifyCanViewRequest(user, request);
+
+        return historyRepository
+                .findByMaintenanceRequestIdOrderByCreatedAtAsc(requestId);
+    }
+
+
+    // --------------------------------------------------
+    // Supervisor Approval and Automatic Assignment
+    // --------------------------------------------------
+
+    /**
+     * Approves a maintenance request and immediately
+     * assigns it to the technician with the fewest
+     * active work orders.
+     *
+     * Business rules:
+     *
+     * 1. Only supervisors can approve requests.
+     * 2. Supervisors can only approve requests
+     *    belonging to their own department.
+     * 3. Requests must have PENDING approval.
+     * 4. Completed requests cannot be approved.
+     * 5. Assignment is performed automatically.
+     *
+     * Workload balancing:
+     *
+     * Each technician's active workload is calculated
+     * by counting assigned requests whose status is
+     * not COMPLETED.
+     *
+     * The technician with the smallest count is selected.
+     *
+     * Ties are resolved using the lowest technician ID,
+     * ensuring deterministic behavior.
+     *
+     * @Transactional ensures approval, assignment,
+     * and history updates succeed or fail together.
+     */
     @Transactional
-    public MaintenanceRequest updateRequestStatus(Long id, RequestStatus status, Long actorId) {
+    public MaintenanceRequest approveRequest(
+            Long requestId,
+            Long supervisorId
+    ) {
 
-        MaintenanceRequest request = repository.findById(id).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "Maintenance request not found."
-                ));
+        MaintenanceRequest request = findRequest(requestId);
+        User supervisor = findUser(supervisorId);
 
-        User actor = userRepository.findById(actorId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "User not found."
+        // Only supervisors can approve requests.
+        if (supervisor.getRole() != UserRole.SUPERVISOR) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "Only supervisors can approve maintenance requests."
+            );
+        }
+
+        // Supervisors are restricted to their own department.
+        if (!belongsToSameDepartment(supervisor, request)) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "Supervisors can only approve requests in their department."
+            );
+        }
+
+        // Prevent approving an already processed request.
+        if (request.getApprovalStatus() != ApprovalStatus.PENDING_APPROVAL) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "This maintenance request has already been processed."
+            );
+        }
+
+        // Completed requests cannot be approved.
+        if (request.getStatus() == RequestStatus.COMPLETED) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Cannot approve a completed work order."
+            );
+        }
+
+        // Retrieve all users with the TECHNICIAN role.
+        List<User> technicians = userRepository.findByRole(
+                UserRole.TECHNICIAN
+        );
+
+        if (technicians.isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "No technicians are available for assignment."
+            );
+        }
+
+        /*
+         * Select the technician with the smallest
+         * number of active assigned work orders.
+         *
+         * Example:
+         *
+         * Jane:   3 active work orders
+         * James:  1 active work order
+         * Daniel: 2 active work orders
+         *
+         * James is selected because 1 is the
+         * smallest active workload.
+         *
+         * If workloads are equal, the technician
+         * with the lowest user ID is selected.
+         */
+        User selectedTechnician = technicians.stream()
+                .min(
+                        Comparator
+                                .comparingLong(
+                                        (User technician) ->
+                                                repository.countByAssignedTechnicianIdAndStatusNot(
+                                                        technician.getId(),
+                                                        RequestStatus.COMPLETED
+                                                )
+                                )
+                                .thenComparing(User::getId)
+                )
+                .orElseThrow();
+
+        // Mark the request as approved.
+        request.setApprovalStatus(ApprovalStatus.APPROVED);
+
+        // Record which supervisor approved the request.
+        request.setApprovedBy(supervisor);
+
+        // Record when approval occurred.
+        request.setApprovedAt(LocalDateTime.now());
+
+        // Automatically assign the least-loaded technician.
+        request.setAssignedTechnician(selectedTechnician);
+
+        // Save the approved request and technician assignment.
+        MaintenanceRequest savedRequest = repository.save(request);
+
+        // Record the approval and assignment for auditing.
+        historyRepository.save(new WorkOrderHistory(
+                savedRequest,
+                supervisor,
+                savedRequest.getStatus(),
+                "Request approved. Automatically assigned to "
+                        + selectedTechnician.getName()
+                        + " based on active workload."
         ));
 
-        // Only technicians can update work-order status.
-        if (actor.getRole() != UserRole.TECHNICIAN){
+        return savedRequest;
+    }
+
+
+    // --------------------------------------------------
+    // Update Work-Order Status
+    // --------------------------------------------------
+
+    /**
+     * Allows the assigned technician to start
+     * an approved work order.
+     *
+     * Valid transition:
+     *
+     * OPEN -> IN_PROGRESS
+     */
+    @Transactional
+    public MaintenanceRequest updateRequestStatus(
+            Long id,
+            RequestStatus status,
+            Long actorId
+    ) {
+
+        MaintenanceRequest request = findRequest(id);
+        User actor = findUser(actorId);
+
+        verifyAssignedTechnician(actor, request);
+
+        // Work orders must be approved before work begins.
+        if (request.getApprovalStatus() != ApprovalStatus.APPROVED) {
             throw new ResponseStatusException(
-                    HttpStatus.FORBIDDEN,
-                    "Only technicians can update work order status."
+                    HttpStatus.CONFLICT,
+                    "Work order must be approved before it can be started."
             );
         }
 
-        // Technician must be assigned to this work order.
-        if (request.getAssignedTechnician() == null || !request.getAssignedTechnician().getId().equals(actor.getId())){
-
-            throw new ResponseStatusException(
-                    HttpStatus.FORBIDDEN,
-                    "Technician is not assigned to this work order."
-            );
-        }
-
-        // Only allow OPEN -> IN_PROGRESS.
-        if(request.getStatus() != RequestStatus.OPEN || status != RequestStatus.IN_PROGRESS) {
+        if (request.getStatus() != RequestStatus.OPEN
+                || status != RequestStatus.IN_PROGRESS) {
 
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
@@ -190,13 +483,11 @@ public class MaintenanceRequestService {
             );
         }
 
-        // Update status and record when work began.
         request.setStatus(RequestStatus.IN_PROGRESS);
         request.setStartedAt(LocalDateTime.now());
 
         MaintenanceRequest savedRequest = repository.save(request);
 
-        // Record the status change in work-order history.
         historyRepository.save(new WorkOrderHistory(
                 savedRequest,
                 actor,
@@ -207,93 +498,35 @@ public class MaintenanceRequestService {
         return savedRequest;
     }
 
-    @Transactional
-    public MaintenanceRequest assignTechnician(
-            Long requestId,
-            Long technicianId,
-            Long supervisorId) {
-        MaintenanceRequest request = repository.findById(requestId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "Maintenance request not found."
-        ));
 
-        // Prevent assigning technicians to completed work orders.
-        if( request.getStatus() == RequestStatus.COMPLETED) {
+    // --------------------------------------------------
+    // Add Technician Note
+    // --------------------------------------------------
+
+    /**
+     * Allows the assigned technician to add
+     * notes to an active work order.
+     */
+    @Transactional
+    public MaintenanceRequest addTechnicianNote(
+            Long requestId,
+            String note,
+            Long actorId
+    ) {
+
+        MaintenanceRequest request = findRequest(requestId);
+        User actor = findUser(actorId);
+
+        verifyAssignedTechnician(actor, request);
+
+        if (request.getApprovalStatus() != ApprovalStatus.APPROVED) {
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
-                    "Cannot assign technicians to a completed work order."
+                    "Work order must be approved before technician updates."
             );
         }
 
-        User technician = userRepository.findById(technicianId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "Technician not found."
-        ));
-
-        User supervisor = userRepository.findById(supervisorId).orElseThrow(()-> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "Supervisor not found."
-        ));
-
-        if (supervisor.getRole() != UserRole.SUPERVISOR){
-            throw new ResponseStatusException(
-                    HttpStatus.FORBIDDEN,
-                    "Only supervisors can assign technicians."
-            );
-        }
-
-        if (technician.getRole() != UserRole.TECHNICIAN) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "Selected user is not a technician."
-            );
-        }
-
-        request.setAssignedTechnician(technician);
-
-        MaintenanceRequest savedRequest = repository.save(request);
-
-        WorkOrderHistory history = new WorkOrderHistory(
-                savedRequest,
-                supervisor,
-                savedRequest.getStatus(),
-                "Assigned technician: " + technician.getName()
-        );
-
-        historyRepository.save(history);
-
-        return savedRequest;
-    }
-
-    @Transactional
-    public MaintenanceRequest addTechnicianNote(Long requestId, String note, Long actorId) {
-
-        MaintenanceRequest request = repository.findById(requestId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "Maintenance request not found."
-        ));
-
-        User actor = userRepository.findById(actorId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "User not found."
-        ));
-
-        if (actor.getRole() != UserRole.TECHNICIAN) {
-            throw new ResponseStatusException(
-                    HttpStatus.FORBIDDEN,
-                    "Only technicians can add work order notes."
-            );
-        }
-
-        if (request.getAssignedTechnician() == null || !request.getAssignedTechnician().getId().equals(actor.getId())) {
-            throw new ResponseStatusException(
-                    HttpStatus.FORBIDDEN,
-                    "Technician is not assigned to this work order."
-            );
-        }
-
-        // Prevent modification to completed work orders.
-        if(request.getStatus() == RequestStatus.COMPLETED) {
+        if (request.getStatus() == RequestStatus.COMPLETED) {
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
                     "Cannot add notes to a completed work order."
@@ -309,124 +542,119 @@ public class MaintenanceRequestService {
 
         request.setTechnicianNotes(note);
 
-        MaintenanceRequest savedRequest = repository.save((request));
+        MaintenanceRequest savedRequest = repository.save(request);
 
-        WorkOrderHistory history = new WorkOrderHistory(
+        historyRepository.save(new WorkOrderHistory(
                 savedRequest,
                 actor,
                 savedRequest.getStatus(),
                 note
-        );
-        historyRepository.save(history);
+        ));
 
         return savedRequest;
     }
 
+
+    // --------------------------------------------------
+    // Update Estimated Completion
+    // --------------------------------------------------
+
+    /**
+     * Allows the assigned technician to provide
+     * an estimated completion date and time.
+     *
+     * The estimate must be in the future.
+     */
     @Transactional
-    public MaintenanceRequest updateEstimatedCompletion(Long requestId,
-                                                        LocalDateTime estimatedCompletionAt,
-                                                        Long actorId) {
-        MaintenanceRequest request = repository.findById(requestId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "Maintenance request not found."
-        ));
+    public MaintenanceRequest updateEstimatedCompletion(
+            Long requestId,
+            LocalDateTime estimatedCompletionAt,
+            Long actorId
+    ) {
 
-        User actor = userRepository.findById((actorId)).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "User not found."
-        ));
+        MaintenanceRequest request = findRequest(requestId);
+        User actor = findUser(actorId);
 
-        // Verify the user is a technician.
-        if (actor.getRole() != UserRole.TECHNICIAN) {
+        verifyAssignedTechnician(actor, request);
+
+        if (request.getApprovalStatus() != ApprovalStatus.APPROVED) {
             throw new ResponseStatusException(
-                    HttpStatus.FORBIDDEN,
-                    "Only technicians can update estimated completion times."
+                    HttpStatus.CONFLICT,
+                    "Work order must be approved before technician updates."
             );
         }
 
-        // Verify the technician is assigned to this request.
-        if (request.getAssignedTechnician() == null || !request.getAssignedTechnician().getId().equals(actor.getId())){
-            throw new ResponseStatusException(
-                    HttpStatus.FORBIDDEN,
-                    "Technician is not assigned to this work order."
-            );
-        }
-
-        // Prevent changes to estimated completion dates after completion.
-        if(request.getStatus() == RequestStatus.COMPLETED) {
+        if (request.getStatus() == RequestStatus.COMPLETED) {
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
                     "Cannot update the estimated completion date of a completed work order."
             );
         }
 
-        // Validate the estimated completion time.
-        if (estimatedCompletionAt == null || !estimatedCompletionAt.isAfter(LocalDateTime.now())) {
+        if (estimatedCompletionAt == null
+                || !estimatedCompletionAt.isAfter(LocalDateTime.now())) {
+
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
                     "Estimated completion must be a future date and time."
             );
         }
 
-        // Update the maintenance request.
         request.setEstimatedCompletionAt(estimatedCompletionAt);
 
         MaintenanceRequest savedRequest = repository.save(request);
 
-        // Record the change in work-order history.
-        WorkOrderHistory history = new WorkOrderHistory(
+        historyRepository.save(new WorkOrderHistory(
                 savedRequest,
                 actor,
                 savedRequest.getStatus(),
                 "Estimated completion updated to " + estimatedCompletionAt
-        );
-        historyRepository.save(history);
+        ));
 
         return savedRequest;
     }
 
+
+    // --------------------------------------------------
+    // Complete Work Order
+    // --------------------------------------------------
+
+    /**
+     * Allows the assigned technician to complete
+     * an approved work order.
+     *
+     * Requirements:
+     *
+     * - Request must be approved.
+     * - Status must be IN_PROGRESS.
+     * - A resolution summary must be provided.
+     */
     @Transactional
     public MaintenanceRequest completeRequest(
             Long requestId,
             String resolutionSummary,
-            Long actorId) {
+            Long actorId
+    ) {
 
-        MaintenanceRequest request = repository.findById(requestId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "Maintenance request not found."
-        ));
+        MaintenanceRequest request = findRequest(requestId);
+        User actor = findUser(actorId);
 
-        User actor = userRepository.findById(actorId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "User not found."
-        ));
+        verifyAssignedTechnician(actor, request);
 
-        // Verify that the user is a technician.
-        if(actor.getRole() != UserRole.TECHNICIAN) {
+        if (request.getApprovalStatus() != ApprovalStatus.APPROVED) {
             throw new ResponseStatusException(
-                    HttpStatus.FORBIDDEN,
-                    "Only technicians can complete work orders."
+                    HttpStatus.CONFLICT,
+                    "Work order must be approved before completion."
             );
         }
 
-        // Verify that the technician is assigned to this work order.
-        if (request.getAssignedTechnician() == null || ! request.getAssignedTechnician().getId().equals(actor.getId())){
-
-            throw new ResponseStatusException(
-                    HttpStatus.FORBIDDEN,
-                    "Technician is not assigned to this work order."
-            );
-        }
-
-        // A work order must be in progress before it can be completed.
         if (request.getStatus() != RequestStatus.IN_PROGRESS) {
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
-                    "Only work order in progress can be completed."
+                    "Only work orders in progress can be completed."
             );
         }
 
-        // Require a meaningful resolution summary.
         if (resolutionSummary == null || resolutionSummary.isBlank()) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
@@ -434,42 +662,48 @@ public class MaintenanceRequestService {
             );
         }
 
-        // Record completion details.
         request.setStatus(RequestStatus.COMPLETED);
         request.setResolutionSummary(resolutionSummary.trim());
         request.setCompletedAt(LocalDateTime.now());
 
         MaintenanceRequest savedRequest = repository.save(request);
 
-        // Record the completion in work-order history.
-        WorkOrderHistory history = new WorkOrderHistory(
+        historyRepository.save(new WorkOrderHistory(
                 savedRequest,
                 actor,
                 RequestStatus.COMPLETED,
-                "Work order completed. Resolution: " + resolutionSummary.trim()
-        );
-
-        historyRepository.save(history);
+                "Work order completed. Resolution: "
+                        + resolutionSummary.trim()
+        ));
 
         return savedRequest;
     }
 
+
+    // --------------------------------------------------
+    // Comments
+    // --------------------------------------------------
+
+    /**
+     * Adds a comment to a work order.
+     *
+     * Users must have permission to view the request.
+     *
+     * Comments remain available throughout the
+     * approval and maintenance workflow.
+     */
     @Transactional
-    public WorkOrderComment addComment(Long requestId, Long authorId, String content) {
+    public WorkOrderComment addComment(
+            Long requestId,
+            Long authorId,
+            String content
+    ) {
 
-        // Find the maintenance request.
-        MaintenanceRequest request = repository.findById(requestId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "Maintenance request not found."
-        ));
+        MaintenanceRequest request = findRequest(requestId);
+        User author = findUser(authorId);
 
-        // Find the user submitting the comment.
-        User author = userRepository.findById(authorId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "User not found."
-        ));
+        verifyCanViewRequest(author, request);
 
-        // Reject empty comments.
         if (content == null || content.isBlank()) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
@@ -477,58 +711,29 @@ public class MaintenanceRequestService {
             );
         }
 
-        // Requesters and supervisors can only comment within their department.
-        if (author.getRole() == UserRole.REQUESTER || author.getRole() == UserRole.SUPERVISOR){
-
-            if (author.getDepartment() == null ||
-            request.getDepartment() == null ||
-            !author.getDepartment().getId().equals(request.getDepartment().getId())) {
-
-                throw new ResponseStatusException(
-                        HttpStatus.FORBIDDEN,
-                        "You can only comment on work orders within your department."
-                );
-            }
-        }
-
-        // Create and save the comment.
-        WorkOrderComment comment = new WorkOrderComment(
+        return commentRepository.save(new WorkOrderComment(
                 request,
                 author,
                 content.trim()
-        );
-
-        return commentRepository.save(comment);
+        ));
     }
 
-    public List<WorkOrderComment> getRequestComments(Long requestId, Long userId) {
+    /**
+     * Retrieves comments belonging to a work order.
+     *
+     * Department visibility restrictions apply.
+     */
+    public List<WorkOrderComment> getRequestComments(
+            Long requestId,
+            Long userId
+    ) {
 
-        // Find the maintenance request.
-        MaintenanceRequest request = repository.findById(requestId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "Maintenance request not found."
-        ));
+        MaintenanceRequest request = findRequest(requestId);
+        User user = findUser(userId);
 
-        // Find the user requesting the comments.
-        User user = userRepository.findById(userId).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND,
-                "User not found."
-        ));
+        verifyCanViewRequest(user, request);
 
-        // Requesters and supervisors can only view comments within their department.
-        if (user.getRole() == UserRole.REQUESTER || user.getRole() == UserRole.SUPERVISOR) {
-
-            if(user.getDepartment() == null || request.getDepartment() == null ||
-            !user.getDepartment().getId().equals((request.getDepartment().getId()))) {
-
-                throw new ResponseStatusException(
-                        HttpStatus.FORBIDDEN,
-                        "You can only view comments on work orders within your department."
-                );
-            }
-        }
-
-        // Retrieve comments in chronological order
-        return commentRepository.findByMaintenanceRequestIdOrderByCreatedAtAsc(requestId);
+        return commentRepository
+                .findByMaintenanceRequestIdOrderByCreatedAtAsc(requestId);
     }
 }

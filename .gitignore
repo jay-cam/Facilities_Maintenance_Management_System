@@ -47,3 +47,7 @@ coverage/
 
 *.bak
 
+
+# Database backups
+facility_maintenance.sql
+facility_maintenance_backup.dump

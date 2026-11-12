@@ -1,14 +1,12 @@
 package com.facilitymaintenance.backend.config;
 
+import com.facilitymaintenance.backend.model.Department;
 import com.facilitymaintenance.backend.model.User;
 import com.facilitymaintenance.backend.model.UserRole;
-import com.facilitymaintenance.backend.repository.UserRepository;
-import com.facilitymaintenance.backend.model.Department;
 import com.facilitymaintenance.backend.repository.DepartmentRepository;
+import com.facilitymaintenance.backend.repository.UserRepository;
 
 import org.springframework.boot.CommandLineRunner;
-import org.springframework.boot.DefaultApplicationArguments;
-import org.springframework.boot.jackson.JacksonMixinModuleEntries;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -16,67 +14,160 @@ import org.springframework.context.annotation.Configuration;
 public class DemoDataInitializer {
 
     @Bean
-    CommandLineRunner initializeUsers(UserRepository userRepository, DepartmentRepository departmentRepository, JacksonMixinModuleEntries jacksonMixinModuleEntries){
+    CommandLineRunner initializeUsers(
+            UserRepository userRepository,
+            DepartmentRepository departmentRepository
+    ) {
         return args -> {
 
-            // Initialize demo users.
-            if (!userRepository.existsByEmail("john.smith@example.com")) {
-                userRepository.save(new User(
-                        "John Smith",
-                        "john.smith@example.com",
-                        UserRole.REQUESTER
-                ));
+            // --------------------------------------------------
+            // 1. Initialize departments
+            // --------------------------------------------------
+
+            String[] departmentNames = {
+                    "Waterfront Operations",
+                    "Port Operations",
+                    "Ship Maintenance & Repair",
+                    "Logistics & Supply",
+                    "Security Operations",
+                    "Administrative Services",
+                    "Service Technicians"
+            };
+
+            for (String departmentName : departmentNames) {
+                if (departmentRepository.findByName(departmentName).isEmpty()) {
+                    departmentRepository.save(
+                            new Department(departmentName)
+                    );
+                }
             }
 
-            if(!userRepository.existsByEmail("jane.doe@example.com")){
-                userRepository.save(new User(
-                        "Jane Doe",
-                        "jane.doe@example.com",
-                        UserRole.TECHNICIAN
-                ));
-            }
+            // --------------------------------------------------
+            // 2. Retrieve departments
+            // --------------------------------------------------
 
-            if(!userRepository.existsByEmail("robert.jones@example.com")){
-                userRepository.save(new User(
-                        "Robert Jones",
-                        "robert.jones@example.com",
-                        UserRole.SUPERVISOR
-                ));
-            }
+            Department waterfront = departmentRepository
+                    .findByName("Waterfront Operations")
+                    .orElseThrow();
 
-            // Initialize demo departments
-            if (departmentRepository.count() == 0) {
+            Department portOperations = departmentRepository
+                    .findByName("Port Operations")
+                    .orElseThrow();
 
-                departmentRepository.save(new Department("Waterfront Operations"));
-                departmentRepository.save(new Department("Port Operations"));
-                departmentRepository.save(new Department("Ship Maintenance & Repair"));
-                departmentRepository.save(new Department("Logistics & Supply"));
-                departmentRepository.save(new Department("Security Operations"));
-                departmentRepository.save(new Department("Administrative Services"));
-            }
+            Department logistics = departmentRepository
+                    .findByName("Logistics & Supply")
+                    .orElseThrow();
 
-            // Assign departments to existing demo users.
-            Department waterfront = departmentRepository.findByName("Waterfront Operations").orElseThrow();
+            Department serviceTechnicians = departmentRepository
+                    .findByName("Service Technicians")
+                    .orElseThrow();
 
-            Department shipMaintenance = departmentRepository.findByName("Ship Maintenance & Repair").orElseThrow();
+            // --------------------------------------------------
+            // 3. Waterfront Operations
+            // --------------------------------------------------
 
-            // John Smith
-            User john = userRepository.findByEmail("john.smith@example.com").orElseThrow();
+            createOrUpdateUser(
+                    userRepository,
+                    "John Smith",
+                    "john.smith@example.com",
+                    UserRole.REQUESTER,
+                    waterfront
+            );
 
-            john.setDepartment(waterfront);
-            userRepository.save(john);
+            createOrUpdateUser(
+                    userRepository,
+                    "Robert Jones",
+                    "robert.jones@example.com",
+                    UserRole.SUPERVISOR,
+                    waterfront
+            );
 
-            // Jane Doe
-            User jane = userRepository.findByEmail("jane.doe@example.com").orElseThrow();
+            // --------------------------------------------------
+            // 4. Port Operations
+            // --------------------------------------------------
 
-            jane.setDepartment(shipMaintenance);
-            userRepository.save(jane);
+            createOrUpdateUser(
+                    userRepository,
+                    "Sarah Mitchell",
+                    "sarah.mitchell@example.com",
+                    UserRole.REQUESTER,
+                    portOperations
+            );
 
-            // Robert Jones
-            User robert = userRepository.findByEmail("robert.jones@example.com").orElseThrow();
+            createOrUpdateUser(
+                    userRepository,
+                    "Michael Torres",
+                    "michael.torres@example.com",
+                    UserRole.SUPERVISOR,
+                    portOperations
+            );
 
-            robert.setDepartment(waterfront);
-            userRepository.save(robert);
+            // --------------------------------------------------
+            // 5. Logistics & Supply
+            // --------------------------------------------------
+
+            createOrUpdateUser(
+                    userRepository,
+                    "Emily Carter",
+                    "emily.carter@example.com",
+                    UserRole.REQUESTER,
+                    logistics
+            );
+
+            createOrUpdateUser(
+                    userRepository,
+                    "David Chen",
+                    "david.chen@example.com",
+                    UserRole.SUPERVISOR,
+                    logistics
+            );
+
+            // --------------------------------------------------
+            // 6. Service Technicians
+            // --------------------------------------------------
+
+            createOrUpdateUser(
+                    userRepository,
+                    "Jane Doe",
+                    "jane.doe@example.com",
+                    UserRole.TECHNICIAN,
+                    serviceTechnicians
+            );
+
+            createOrUpdateUser(
+                    userRepository,
+                    "James Wilson",
+                    "james.wilson@example.com",
+                    UserRole.TECHNICIAN,
+                    serviceTechnicians
+            );
+
+            createOrUpdateUser(
+                    userRepository,
+                    "Daniel Rodriguez",
+                    "daniel.rodriguez@example.com",
+                    UserRole.TECHNICIAN,
+                    serviceTechnicians
+            );
+
         };
+    }
+
+    private void createOrUpdateUser(
+            UserRepository userRepository,
+            String name,
+            String email,
+            UserRole role,
+            Department department
+    ) {
+
+        User user = userRepository.findByEmail(email)
+                .orElseGet(() -> new User(name, email, role));
+
+        user.setName(name);
+        user.setRole(role);
+        user.setDepartment(department);
+
+        userRepository.save(user);
     }
 }
